@@ -36,7 +36,7 @@ class FakeAsyncClient:
 @pytest.mark.asyncio
 async def test_streaming_proxy_preserves_chunks_and_records_event(monkeypatch, tmp_path):
     monkeypatch.setattr(server.httpx, "AsyncClient", FakeAsyncClient)
-    monkeypatch.setattr(server, "store", Store(f"sqlite:///{tmp_path}/events.db"))
+    monkeypatch.setattr(server.app.state, "store", Store(f"sqlite:///{tmp_path}/events.db"), raising=False)
     transport = ASGITransport(app=server.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post("/v1/chat/completions", json={
@@ -47,4 +47,4 @@ async def test_streaming_proxy_preserves_chunks_and_records_event(monkeypatch, t
     assert response.status_code == 200
     assert "data: [DONE]" in response.text
     assert int(response.headers["x-tokenshield-original-tokens"]) > 0
-    assert server.store.summary()["n"] == 1
+    assert server.app.state.store.summary()["n"] == 1
