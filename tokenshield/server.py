@@ -7,11 +7,13 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .compression import estimate_tokens, optimize_messages
+from .compression import optimize_messages
 from .config import settings
+from .metering import TokenMeter
 from .storage import Store
 
 store = Store(settings.database_url)
+meter = TokenMeter(settings.pricing_json)
 
 
 @asynccontextmanager
@@ -22,11 +24,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="TokenShield", version="0.1.0", lifespan=lifespan)
 
 
-def _cost(model: str | None, input_tokens: int, output_tokens: int = 0) -> float:
-    # Conservative configurable placeholder; provider-specific pricing is a follow-up module.
-    return (input_tokens + output_tokens) * 0.00001
-
-
 def _event(request: Request, request_id: str, started: float, model: str | None,
            original_tokens: int, optimized_tokens: int, output_tokens: int,
            compressed_items: int):
@@ -35,8 +32,8 @@ def _event(request: Request, request_id: str, started: float, model: str | None,
         "model": model, "provider": settings.upstream_base_url,
         "session_hash": hashlib.sha256(request.headers.get("x-session-id", "").encode()).hexdigest()[:16],
         "original_tokens": original_tokens, "optimized_tokens": optimized_tokens,
-        "output_tokens": output_tokens, "original_cost": _cost(model, original_tokens, output_tokens),
-        "optimized_cost": _cost(model, optimized_tokens, output_tokens),
+        "output_tokens": output_tokens, "original_cost": meter.cost(model, original_tokens, output_tokens),
+        "optimized_cost": meter.cost(model, optimized_tokens, output_tokens),
         "latency_ms": round((time.perf_counter() - started) * 1000, 2),
         "cache_hit": 0, "fallback": 0, "compressed_items": compressed_items, "task_success": None,
     }
@@ -74,13 +71,13 @@ async def chat_completions(request: Request):
     body = await request.json()
     request_id = "req_" + uuid.uuid4().hex
     original_messages = body.get("messages", [])
-    original_tokens = estimate_tokens(original_messages)
+    original_tokens = meter.count(original_messages, body.get("model"))
     optimized_messages, compressed_items = optimize_messages(
         original_messages, store, settings.compression_enabled, settings.compression_min_chars
     )
     outgoing = dict(body)
     outgoing["messages"] = optimized_messages
-    optimized_tokens = estimate_tokens(optimized_messages)
+    optimized_tokens = meter.count(optimized_messages, body.get("model"))
     headers = {"content-type": "application/json"}
     if settings.upstream_api_key:
         headers["authorization"] = f"Bearer {settings.upstream_api_key}"
@@ -108,7 +105,7 @@ async def chat_completions(request: Request):
             finally:
                 await upstream.aclose()
                 await client.aclose()
-                output_tokens = estimate_tokens(b"".join(chunks).decode(errors="replace"))
+                output_tokens = meter.count(b"".join(chunks).decode(errors="replace"), body.get("model"))
                 store.save_event(_event(request, request_id, started, body.get("model"),
                                         original_tokens, optimized_tokens, output_tokens, compressed_items))
 

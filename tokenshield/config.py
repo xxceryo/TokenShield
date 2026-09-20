@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     compression_min_chars: int = 800
     raw_retention_hours: int = 24
     max_body_bytes: int = 20_000_000
+    pricing_json: str = "{}"
     model_config = SettingsConfigDict(env_prefix="TOKENSHIELD_", env_file=".env")
 
 

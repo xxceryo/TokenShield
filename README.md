@@ -13,6 +13,8 @@ source .venv/bin/activate
 pip install -e '.[dev]'
 export TOKENSHIELD_UPSTREAM_API_KEY='your-key'
 export TOKENSHIELD_UPSTREAM_BASE_URL='https://api.openai.com'
+# 价格单位为 USD / 1,000,000 tokens；支持 * 后缀匹配模型族
+export TOKENSHIELD_PRICING_JSON='{"gpt-4o*":{"input_per_million":2.5,"output_per_million":10}}'
 uvicorn tokenshield.server:app --host 127.0.0.1 --port 8787
 ```
 
@@ -21,7 +23,8 @@ uvicorn tokenshield.server:app --host 127.0.0.1 --port 8787
 ## 当前边界
 
 - 默认只支持非流式 `/v1/chat/completions`；
-- 默认使用可解释的启发式 token 估算，后续按 provider 接入 tokenizer；
+- OpenAI 类模型使用 `tiktoken`；不识别的模型安全回退为字符估算；
+- 价格通过 `TOKENSHIELD_PRICING_JSON` 注入，不在代码中硬编码；
 - 原文保存在本地 SQLite，后续增加 TTL、加密和脱敏；
 - 压缩默认可通过 `TOKENSHIELD_COMPRESSION_ENABLED=false` 关闭。
 
