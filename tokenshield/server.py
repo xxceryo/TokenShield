@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .compression import optimize_messages
 from .config import settings
 from .metering import TokenMeter
+from .schemas import validate_chat_request
 from .storage import Store
 
 store = Store(settings.database_url)
@@ -68,7 +69,10 @@ async def source(source_id: str):
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     started = time.perf_counter()
-    body = await request.json()
+    try:
+        body = validate_chat_request(await request.json())
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
     request_id = "req_" + uuid.uuid4().hex
     original_messages = body.get("messages", [])
     original_tokens = meter.count(original_messages, body.get("model"))

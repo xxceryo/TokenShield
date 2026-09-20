@@ -4,6 +4,8 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .schemas import EventRecord
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -24,6 +26,7 @@ class Store:
 
     def _init(self):
         with self._connect() as c:
+            c.execute("CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             c.executescript("""
             CREATE TABLE IF NOT EXISTS events (
               request_id TEXT PRIMARY KEY, created_at TEXT NOT NULL,
@@ -40,6 +43,7 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
             """)
+            c.execute("INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', '1')")
 
     def save_source(self, content: str) -> str:
         source_id = "src_" + hashlib.sha256((content + _now()).encode()).hexdigest()[:20]
@@ -53,13 +57,20 @@ class Store:
             row = c.execute("SELECT content FROM sources WHERE source_id=?", (source_id,)).fetchone()
         return row[0] if row else None
 
-    def save_event(self, event: dict):
+    def save_event(self, event: dict | EventRecord):
+        event = (event.model_dump() if isinstance(event, EventRecord)
+                 else EventRecord.model_validate(event).model_dump())
         fields = ["request_id", "created_at", "model", "provider", "session_hash",
                   "original_tokens", "optimized_tokens", "output_tokens", "original_cost",
                   "optimized_cost", "latency_ms", "cache_hit", "fallback", "compressed_items", "task_success"]
         values = [event.get(k) for k in fields]
         with self.lock, self._connect() as c:
             c.execute(f"INSERT OR REPLACE INTO events ({','.join(fields)}) VALUES ({','.join('?' for _ in fields)})", values)
+
+    def schema_version(self) -> int:
+        with self._connect() as c:
+            row = c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
+        return int(row[0]) if row else 0
 
     def summary(self) -> dict:
         with self._connect() as c:
