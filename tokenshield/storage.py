@@ -31,6 +31,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS events (
               request_id TEXT PRIMARY KEY, created_at TEXT NOT NULL,
               model TEXT, provider TEXT, session_hash TEXT,
+              pricing_status TEXT NOT NULL DEFAULT 'missing',
               original_tokens INTEGER NOT NULL, optimized_tokens INTEGER NOT NULL,
               output_tokens INTEGER NOT NULL DEFAULT 0, original_cost REAL NOT NULL DEFAULT 0,
               optimized_cost REAL NOT NULL DEFAULT 0, latency_ms REAL,
@@ -43,7 +44,13 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
             """)
-            c.execute("INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', '1')")
+            version = c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
+            current_version = int(version[0]) if version else 0
+            if current_version < 2:
+                columns = {row[1] for row in c.execute("PRAGMA table_info(events)")}
+                if "pricing_status" not in columns:
+                    c.execute("ALTER TABLE events ADD COLUMN pricing_status TEXT NOT NULL DEFAULT 'missing'")
+                c.execute("INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', '2')")
 
     def save_source(self, content: str) -> str:
         source_id = "src_" + hashlib.sha256((content + _now()).encode()).hexdigest()[:20]
@@ -60,7 +67,7 @@ class Store:
     def save_event(self, event: dict | EventRecord):
         event = (event.model_dump() if isinstance(event, EventRecord)
                  else EventRecord.model_validate(event).model_dump())
-        fields = ["request_id", "created_at", "model", "provider", "session_hash",
+        fields = ["request_id", "created_at", "model", "provider", "session_hash", "pricing_status",
                   "original_tokens", "optimized_tokens", "output_tokens", "original_cost",
                   "optimized_cost", "latency_ms", "cache_hit", "fallback", "compressed_items", "task_success"]
         values = [event.get(k) for k in fields]
@@ -78,7 +85,8 @@ class Store:
                 COALESCE(SUM(optimized_tokens),0) optimized_tokens,
                 COALESCE(SUM(original_cost),0) original_cost,
                 COALESCE(SUM(optimized_cost),0) optimized_cost,
-                COALESCE(SUM(cache_hit),0) cache_hits, COALESCE(SUM(fallback),0) fallbacks
+                COALESCE(SUM(cache_hit),0) cache_hits, COALESCE(SUM(fallback),0) fallbacks,
+                COALESCE(SUM(CASE WHEN pricing_status='missing' THEN 1 ELSE 0 END),0) pricing_missing
                 FROM events""").fetchone()
         d = dict(row)
         d["token_reduction_rate"] = round(1 - d["optimized_tokens"] / d["original_tokens"], 4) if d["original_tokens"] else 0

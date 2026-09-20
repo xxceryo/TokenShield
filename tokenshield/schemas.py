@@ -8,6 +8,7 @@ class EventRecord(BaseModel):
     created_at: str
     model: str | None = None
     provider: str
+    pricing_status: str = "missing"
     session_hash: str | None = None
     original_tokens: int = Field(ge=0)
     optimized_tokens: int = Field(ge=0)

@@ -42,6 +42,7 @@ def _event(request: Request, request_id: str, started: float, model: str | None,
     return {
         "request_id": request_id, "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "model": model, "provider": settings.upstream_base_url,
+        "pricing_status": _meter(request).pricing_status(model),
         "session_hash": hashlib.sha256(request.headers.get("x-session-id", "").encode()).hexdigest()[:16],
         "original_tokens": original_tokens, "optimized_tokens": optimized_tokens,
         "output_tokens": output_tokens, "original_cost": _meter(request).cost(model, original_tokens, output_tokens),

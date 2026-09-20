@@ -39,6 +39,13 @@ class TokenMeter:
                     return pricing
         return ModelPricing()
 
+    def pricing_status(self, model: str | None) -> str:
+        if model in self.pricing:
+            return "configured"
+        if model and any(pattern.endswith("*") and model.startswith(pattern[:-1]) for pattern in self.pricing):
+            return "configured"
+        return "missing"
+
     def count(self, value, model: str | None = None) -> int:
         text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
         if tiktoken is not None:

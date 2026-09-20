@@ -11,7 +11,7 @@ def test_chat_request_validation_rejects_missing_messages():
 
 def test_event_schema_and_database_version(tmp_path):
     store = Store(f"sqlite:///{tmp_path}/events.db")
-    assert store.schema_version() == 1
+    assert store.schema_version() == 2
     store.save_event(EventRecord(
         request_id="req-1", created_at="now", provider="test",
         original_tokens=10, optimized_tokens=8,
