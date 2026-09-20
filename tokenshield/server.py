@@ -2,9 +2,11 @@ import hashlib
 import time
 import uuid
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+
 import httpx
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+
 from .compression import estimate_tokens, optimize_messages
 from .config import settings
 from .storage import Store
@@ -23,6 +25,29 @@ app = FastAPI(title="TokenShield", version="0.1.0", lifespan=lifespan)
 def _cost(model: str | None, input_tokens: int, output_tokens: int = 0) -> float:
     # Conservative configurable placeholder; provider-specific pricing is a follow-up module.
     return (input_tokens + output_tokens) * 0.00001
+
+
+def _event(request: Request, request_id: str, started: float, model: str | None,
+           original_tokens: int, optimized_tokens: int, output_tokens: int,
+           compressed_items: int):
+    return {
+        "request_id": request_id, "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "model": model, "provider": settings.upstream_base_url,
+        "session_hash": hashlib.sha256(request.headers.get("x-session-id", "").encode()).hexdigest()[:16],
+        "original_tokens": original_tokens, "optimized_tokens": optimized_tokens,
+        "output_tokens": output_tokens, "original_cost": _cost(model, original_tokens, output_tokens),
+        "optimized_cost": _cost(model, optimized_tokens, output_tokens),
+        "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        "cache_hit": 0, "fallback": 0, "compressed_items": compressed_items, "task_success": None,
+    }
+
+
+def _response_headers(request_id: str, original_tokens: int, optimized_tokens: int):
+    return {
+        "x-tokenshield-request-id": request_id,
+        "x-tokenshield-original-tokens": str(original_tokens),
+        "x-tokenshield-optimized-tokens": str(optimized_tokens),
+    }
 
 
 @app.get("/health")
@@ -60,28 +85,51 @@ async def chat_completions(request: Request):
     if settings.upstream_api_key:
         headers["authorization"] = f"Bearer {settings.upstream_api_key}"
     upstream_url = settings.upstream_base_url.rstrip("/") + "/v1/chat/completions"
+    if body.get("stream"):
+        client = httpx.AsyncClient(timeout=120)
+        try:
+            upstream_request = client.build_request("POST", upstream_url, json=outgoing, headers=headers)
+            upstream = await client.send(upstream_request, stream=True)
+            if upstream.status_code >= 400:
+                detail = (await upstream.aread())[:2000].decode(errors="replace")
+                await upstream.aclose()
+                await client.aclose()
+                raise HTTPException(502, f"upstream returned HTTP {upstream.status_code}: {detail}")
+        except httpx.RequestError as exc:
+            await client.aclose()
+            raise HTTPException(502, f"upstream connection failed: {exc}") from exc
+
+        async def body_iterator():
+            chunks: list[bytes] = []
+            try:
+                async for chunk in upstream.aiter_bytes():
+                    chunks.append(chunk)
+                    yield chunk
+            finally:
+                await upstream.aclose()
+                await client.aclose()
+                output_tokens = estimate_tokens(b"".join(chunks).decode(errors="replace"))
+                store.save_event(_event(request, request_id, started, body.get("model"),
+                                        original_tokens, optimized_tokens, output_tokens, compressed_items))
+
+        return StreamingResponse(body_iterator(), status_code=upstream.status_code,
+                                 media_type=upstream.headers.get("content-type", "text/event-stream"),
+                                 headers=_response_headers(request_id, original_tokens, optimized_tokens))
+
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(upstream_url, json=outgoing, headers=headers)
-        response.raise_for_status()
+        if response.status_code >= 400:
+            detail = response.text[:2000]
+            raise HTTPException(502, f"upstream returned HTTP {response.status_code}: {detail}")
         payload = response.json()
-    except httpx.HTTPError as exc:
-        # In production this becomes a bounded retry/fallback policy.
-        raise HTTPException(502, f"upstream request failed: {exc}") from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(502, f"upstream connection failed: {exc}") from exc
     usage = payload.get("usage", {})
     output_tokens = usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0
     model = body.get("model")
-    event = {
-        "request_id": request_id, "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "model": model, "provider": settings.upstream_base_url,
-        "session_hash": hashlib.sha256(request.headers.get("x-session-id", "").encode()).hexdigest()[:16],
-        "original_tokens": original_tokens, "optimized_tokens": optimized_tokens,
-        "output_tokens": output_tokens, "original_cost": _cost(model, original_tokens, output_tokens),
-        "optimized_cost": _cost(model, optimized_tokens, output_tokens),
-        "latency_ms": round((time.perf_counter() - started) * 1000, 2),
-        "cache_hit": 0, "fallback": 0, "compressed_items": compressed_items, "task_success": None,
-    }
-    store.save_event(event)
+    store.save_event(_event(request, request_id, started, model, original_tokens,
+                            optimized_tokens, output_tokens, compressed_items))
     return JSONResponse(payload, headers={
         "x-tokenshield-request-id": request_id,
         "x-tokenshield-original-tokens": str(original_tokens),

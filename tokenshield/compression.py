@@ -1,6 +1,7 @@
 import json
 import re
 from dataclasses import dataclass
+
 from .storage import Store
 
 
@@ -21,9 +22,9 @@ def compress_text(text: str, store: Store, min_chars: int) -> CompressionResult:
         return CompressionResult(text, None, False)
     source_id = store.save_source(text)
     lines = text.splitlines()
-    is_log = bool(re.search(r"(error|exception|traceback|failed|warning)", text, re.I))
+    is_log = bool(re.search(r"(error|exception|traceback|failed|warning)", text, re.IGNORECASE))
     if is_log:
-        selected = [line for line in lines if re.search(r"(error|exception|traceback|failed|warning|assert)", line, re.I)]
+        selected = [line for line in lines if re.search(r"(error|exception|traceback|failed|warning|assert)", line, re.IGNORECASE)]
         selected = selected[:120] + (["... [middle output indexed as " + source_id + "] ..."] if len(lines) > 120 else [])
     else:
         selected = lines[:60] + (["... [output indexed as " + source_id + "] ..."] if len(lines) > 60 else [])
